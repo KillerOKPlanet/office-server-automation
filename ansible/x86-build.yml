@@ -1,0 +1,140 @@
+---
+- name: Check SSH access to Proxmox VM
+  hosts: x86
+  become: false
+  gather_facts: false
+  vars:
+    vm_id: 100
+    local_folder: "/home/webhmi/VirtualBox Image Maker"
+    openwrt_folder: /home/akuzmuk/openwrt
+    svn_folder: x86
+    remote_filename: openwrt-x86-64-combined-squashfs.vdi
+    remote_subdirectory: /bin/targets/x86/64/
+    remote_full_path: "{{ openwrt_folder }}/{{ remote_subdirectory }}/{{ remote_filename }}"
+    ssh_hostuser: akuzmuk@x86
+
+  tasks:
+    - name: Check SSH access
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 5
+        state: started
+      delegate_to: localhost
+      become: false
+      ignore_errors: true  # Ignore errors to prevent the entire playbook from failing
+      remote_user: akuzmuk
+      register: ssh_check
+    # - debug:
+    #     var: ssh_check
+
+    - name: Start VM if SSH check fails
+      community.general.proxmox_kvm:
+        node: office-server
+        api_user: root@pam
+        api_password: rootpass
+        api_host: localhost
+        vmid: "{{ vm_id }}"
+        state: started
+      delegate_to: localhost
+      become: false
+      register: vm_start_result
+      when: ssh_check.failed
+      async: 100
+      poll: 0
+    # - debug:
+    #     var: vm_start_result
+
+    - name: Recheck SSH access after VM start
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 6
+        state: started
+      delegate_to: localhost
+      become: false
+      ignore_errors: true
+      remote_user: akuzmuk
+      register: ssh_check_after_start
+      retries: 20
+      delay: 5
+      until: "ssh_check_after_start is not failed"
+    # - debug:
+    #     var: ssh_check_after_start
+
+    - name: Run make (building process) on Proxmox VM
+      # ansible.builtin.shell: "make -j$(( $(nproc) + 1 ))"
+      ansible.builtin.shell: "sh ./make-vm.sh"
+      args:
+        chdir: "{{ openwrt_folder }}"
+      register: make_result
+      when: "not ssh_check.failed or (ssh_check.failed and not ssh_check_after_start.failed)"
+    - debug:
+        var: make_result
+
+    # - name: Simulate instant success
+    #   command: /bin/true
+    #   delegate_to: localhost
+    #   register: make_result
+    # - debug:
+    #     var: make_result
+
+
+    - name: Display make output
+      ansible.builtin.debug:
+        var: make_result.stdout_lines
+      when: make_result.rc != 0
+
+    - name: Copy file from VM to local machine
+      ansible.builtin.shell:
+        cmd: "scp {{ ssh_hostuser }}:{{ remote_full_path }} \"{{ local_folder }}/WebHMI.vdi\""
+      delegate_to: localhost
+      become: false
+
+    - name: Get version, minor, and revision
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        VERSION=$(ssh {{ ssh_hostuser }} 'cat {{ openwrt_folder }}/feeds/webhmi/{{ svn_folder }}/files/www/webhmi/config.php' | grep version | head -1 | awk '{gsub(/"/, "", $3);gsub(/;/, "", $3); print $3;}')
+        MINOR=$(ssh {{ ssh_hostuser }} 'cat {{ openwrt_folder }}/feeds/webhmi/{{ svn_folder }}/files/www/webhmi/config.php' | grep minor | head -1 | awk '{gsub(/"/, "", $3);gsub(/;/, "", $3); print $3;}')
+        REVISION=$(ssh {{ ssh_hostuser }} 'svnversion {{ openwrt_folder }}/feeds/webhmi/{{ svn_folder }}')
+        UUID=$(cat /proc/sys/kernel/random/uuid)
+        UUIDWH=$(VBoxManage internalcommands sethduuid WebHMI.vdi | awk '{print $4}')
+        UUIDPD=$(VBoxManage internalcommands sethduuid ProjectFilesAndDatabase.vdi | awk '{print $4}')
+
+        MAC="0800274159A6"
+        VBoxManage modifyvm a041f731-4eb3-4732-9116-534ffc4de5dc --macaddress1 auto
+        MACIS=$(VBoxManage showvminfo a041f731-4eb3-4732-9116-534ffc4de5dc --machinereadable 2>/dev/null | grep mac | awk -F '"' '{print $2}')
+        if [ ! -z "$MACIS" ];
+          then
+            MAC="$MACIS"
+        fi
+        sed "s/----uuidwh----/$UUIDWH/g;s/----uuidpd----/$UUIDPD/g;s/----uuid----/$UUID/g;s/----datetime----/$DATETIME/g;s/----ver----/$VERSION.$MINOR.$REVISION/g;s/----mac----/$MAC/g" WebHMI.vbox.template > WebHMI.vbox
+        FNAME="WebHMI-$VERSION.$MINOR.$REVISION-VirtualBox.zip"
+        IMGNAME="$VERSION.$MINOR.$REVISION.img.gz"
+        zip -r "$FNAME" WebHMI.vbox WebHMI.vdi ProjectFilesAndDatabase.vdi > /dev/null 2>&1
+        scp {{ ssh_hostuser }}:/home/akuzmuk/openwrt/bin/targets/x86/64/openwrt-x86-64-combined-squashfs.img.gz ./$IMGNAME > /dev/null 2>&1
+        
+        echo "$FNAME"
+      args:
+        chdir: "{{ local_folder }}"
+      register: version_result
+      when: make_result.rc == 0
+    # - debug:
+    #     var: version_result
+      
+    - name: Set facts for version and revision
+      ansible.builtin.set_fact:
+        fname: "{{ version_result.stdout }}"
+      when: version_result.rc == 0
+
+    # - name: Rename the file
+    #   delegate_to: localhost
+    #   ansible.builtin.command:
+    #     cmd: |
+    #       mv "{{ local_folder }}/{{ remote_filename }}" "{{ local_folder }}/{{ fname }}"
+    #   when: version_result.rc == 0
+
+    - name: Display zip filename
+      ansible.builtin.debug:
+        var: version_result.stdout
+      when: make_result.rc == 0

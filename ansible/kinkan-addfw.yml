@@ -1,0 +1,87 @@
+---
+- name: Check SSH access to Proxmox VM
+  hosts: kinkan
+  become: false
+  gather_facts: false
+  remote_user: webhmi
+  vars:
+    vm_id: 108
+    ssh_hostuser: webhmi@kinkan.lan
+    local_folder: "/home/webhmi/Kinkan Image Maker"
+    tmp_file: WebHMI.bin
+    tmp_file2: WebHMI.bin
+    svn_folder: kinkan
+    openwrt_folder: /home/webhmi/kinkan
+    remote_subdirectory: bin/targets/rtkmipsel/rtl8197f/
+    remote_filename: openwrt-8devices-rtk-v1.4-rtkmipsel-rtl8197f-kinkan-squashfs-sysupgrade.bin
+    remote_full_path: "{{ openwrt_folder }}/{{ remote_subdirectory }}/{{ remote_filename }}"
+
+  tasks:
+    - name: Check SSH access
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 5
+        state: started
+      delegate_to: localhost
+      become: false
+      ignore_errors: true  # Ignore errors to prevent the entire playbook from failing
+      remote_user: webhmi
+      register: ssh_check
+    # - debug:
+    #     var: ssh_check
+
+    - name: Start VM if SSH check fails
+      community.general.proxmox_kvm:
+        node: office-server
+        api_user: root@pam
+        api_password: rootpass
+        api_host: localhost
+        vmid: "{{ vm_id }}"
+        state: started
+      delegate_to: localhost
+      become: false
+      register: vm_start_result
+      when: ssh_check.failed
+      async: 100
+      poll: 0
+    # - debug:
+    #     var: vm_start_result
+
+    - name: Recheck SSH access after VM start
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 6
+        state: started
+      delegate_to: localhost
+      become: false
+      ignore_errors: true
+      remote_user: akuzmuk
+      register: ssh_check_after_start
+      retries: 20
+      delay: 5
+      until: "ssh_check_after_start is not failed"
+    # - debug:
+    #     var: ssh_check_after_start
+
+    - name: Add .ipk (firmware code) from Proxmox VM to cloud
+      ansible.builtin.shell: "sh ./add-firmware-trunk.sh"
+      args:
+        chdir: "{{ openwrt_folder }}"
+      register: addfw_result
+      when: "not ssh_check.failed or (ssh_check.failed and not ssh_check_after_start.failed)"
+    # - debug:
+    #     var: addfw_result
+
+    # - name: Simulate instant success
+    #   command: /bin/true
+    #   delegate_to: localhost
+    #   register: addfw_result
+    # - debug:
+    #     var: addfw_result
+
+    - name: Display upload output
+      ansible.builtin.debug:
+        var: addfw_result.stdout_lines
+      # when: addfw_result.rc != 0

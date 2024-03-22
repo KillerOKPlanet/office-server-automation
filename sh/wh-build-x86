@@ -1,0 +1,7 @@
+#!/bin/bash
+
+PLAYBOOK_FILE="/home/webhmi/ansible/x86-build.yml"
+
+# Run the Ansible playbook
+ansible-playbook "$PLAYBOOK_FILE"
+

@@ -1,0 +1,148 @@
+---
+- name: Check SSH access to Proxmox VM
+  hosts: rpi4
+  become: false
+  gather_facts: false
+  vars:
+    vm_id: 110
+    local_folder: "/home/webhmi/4RPi Image Maker"
+    openwrt_folder: /home/akuzmuk/openwrt
+    svn_folder: rpi4
+    remote_filename: openwrt-bcm27xx-bcm2711-rpi-4-squashfs-factory.img.gz
+    remote_subdirectory: /bin/targets/brcm2708/bcm2710/
+    remote_full_path: "{{ openwrt_folder }}/{{ remote_subdirectory }}/{{ remote_filename }}"
+    tmp_file1: RaspberryPi.img
+    tmp_file2: RaspberryPi.zip
+    ssh_hostuser: akuzmuk@rpi
+
+  tasks:
+    - name: Check SSH access
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 5
+        state: started
+      delegate_to: localhost
+      become: false
+      ignore_errors: true  # Ignore errors to prevent the entire playbook from failing
+      remote_user: akuzmuk
+      register: ssh_check
+    # - debug:
+    #     var: ssh_check
+
+    - name: Start VM if SSH check fails
+      community.general.proxmox_kvm:
+        node: office-server
+        api_user: root@pam
+        api_password: rootpass
+        api_host: localhost
+        vmid: "{{ vm_id }}"
+        state: started
+      delegate_to: localhost
+      become: false
+      register: vm_start_result
+      when: ssh_check.failed
+      async: 100
+      poll: 0
+    # - debug:
+    #     var: vm_start_result
+
+    - name: Recheck SSH access after VM start
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 6
+        state: started
+      delegate_to: localhost
+      become: false
+      ignore_errors: true
+      remote_user: akuzmuk
+      register: ssh_check_after_start
+      retries: 20
+      delay: 5
+      until: "ssh_check_after_start is not failed"
+    # - debug:
+    #     var: ssh_check_after_start
+
+    - name: Run make (building process) on Proxmox VM
+      # ansible.builtin.shell: "sh update-webhmi.sh && make -j$(( $(nproc) + 1 ))"
+      ansible.builtin.shell: "sh make-zip.sh"
+      args:
+        chdir: "{{ openwrt_folder }}"
+      register: make_result
+      when: "not ssh_check.failed or (ssh_check.failed and not ssh_check_after_start.failed)"
+    - debug:
+        var: make_result
+
+    # - name: Simulate instant success
+    #   command: /bin/true
+    #   delegate_to: localhost
+    #   register: make_result
+    # - debug:
+    #     var: make_result
+
+
+    - name: Display make output
+      ansible.builtin.debug:
+        var: make_result.stdout_lines
+      when: make_result.rc != 0
+
+    - name: Copy file from VM to local machine
+      ansible.builtin.shell:
+        cmd: "scp {{ ssh_hostuser }}:{{ remote_full_path }} \"{{ local_folder }}/\""
+      delegate_to: localhost
+      become: false
+
+    - name: Unzip and copy image file
+      ansible.builtin.shell:
+        cmd: "gunzip -c \"{{ local_folder }}\"/{{ remote_filename }} > \"{{ local_folder }}\"/{{ tmp_file1 }}"
+      delegate_to: localhost
+      register: gunzipped
+    # - debug:
+    #     var: gunzipped
+
+    - name: Get version, minor, and revision
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        VERSION=$(ssh {{ ssh_hostuser }} 'cat {{ openwrt_folder }}/feeds/webhmi/{{ svn_folder }}/files/www/webhmi/config.php' | grep version | head -1 | awk '{gsub(/"/, "", $3);gsub(/;/, "", $3); print $3;}')
+        MINOR=$(ssh {{ ssh_hostuser }} 'cat {{ openwrt_folder }}/feeds/webhmi/{{ svn_folder }}/files/www/webhmi/config.php' | grep minor | head -1 | awk '{gsub(/"/, "", $3);gsub(/;/, "", $3); print $3;}')
+        REVISION=$(ssh {{ ssh_hostuser }} 'svnversion {{ openwrt_folder }}/feeds/webhmi/{{ svn_folder }}')
+        
+        FNAME="WebHMI-$VERSION.$MINOR.$REVISION-{{ tmp_file2 }}"
+        
+        echo "$FNAME"
+        
+      register: version_result
+      when: gunzipped.rc == 0
+    # - debug:
+    #     var: version_result
+      
+    - name: Zip file
+      delegate_to: localhost
+      ansible.builtin.shell:
+        cmd: |
+          zip -9 "{{ local_folder }}/{{ tmp_file2 }}" "{{ local_folder }}/{{ tmp_file1 }}"
+
+    - name: Set facts for version and revision
+      ansible.builtin.set_fact:
+        fname: "{{ version_result.stdout }}"
+      when: version_result.rc == 0
+
+    - name: Rename the file
+      delegate_to: localhost
+      ansible.builtin.command:
+        cmd: |
+          mv "{{ local_folder }}/{{ tmp_file2 }}" "{{ local_folder }}/{{ fname }}"
+      when: version_result.rc == 0
+
+    - name: Display zip filename
+      ansible.builtin.debug:
+        var: version_result.stdout
+      when: make_result.rc == 0
+    
+    - name: Clean tmp files
+      delegate_to: localhost
+      ansible.builtin.command:
+        cmd: |
+          rm "{{ local_folder }}/{{remote_filename}}" "{{ local_folder }}/{{ tmp_file1 }}"
+      when: version_result.rc == 0
