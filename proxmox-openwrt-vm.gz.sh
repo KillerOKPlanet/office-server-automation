@@ -45,7 +45,7 @@ if [ "$MAX_VMID" -lt 10000 ]; then
 fi
 NEXT_VMID=$(( $MAX_VMID + 1 ))
 echo "New VMID is "$NEXT_VMID
-qm create $NEXT_VMID -memory 1024 -net0 virtio,bridge=vmbr0 --name $VMNAME --ostype l26 --sockets 1 --cores 1 --scsihw virtio-scsi-pci --machine q35 --agent 1
+qm create $NEXT_VMID -memory 256 -net0 virtio,bridge=vmbr0 --name $VMNAME --ostype l26 --sockets 1 --cores 1 --scsihw virtio-scsi-pci --machine q35 --agent 1
 
 
 # Import the disk into Proxmox
@@ -65,11 +65,15 @@ qm set $NEXT_VMID --net1 virtio,bridge=vmbr0 && \
 #Also, good idea disable 192.168.1.1 to avoid problems (set to dummy)
 #qm set 10001 --net0 virtio,bridge=vmbr0,link_down=1
 qm set $NEXT_VMID --net0 "virtio,bridge=vmbr0" && \
+qm set $NEXT_VMID --tags "webhmi-tmp" && \
 
  # Start the Proxmox VM
 qm start $NEXT_VMID && \
-sleep 20 && qm set $NEXT_VMID --net0 "e1000,bridge=vmbr2,link_down=1"
+sleep 12 && qm set $NEXT_VMID --net0 "e1000,bridge=vmbr2"
+#sleep 20 && qm set $NEXT_VMID --net0 "e1000,bridge=vmbr2,link_down=1"
 
+
+#script_content='
 #  TODO: known hosts override. add for server.lan key.
 # sleep 30
 # ssh root@192.168.1.1 "
@@ -77,3 +81,7 @@ sleep 20 && qm set $NEXT_VMID --net0 "e1000,bridge=vmbr2,link_down=1"
 # uci del network.lan.ipaddr && \
 # uci commit network
 # /etc/init.d/network restart"
+#'
+#ssh -q webhmi@b100 bash -s << EOF
+#$script_content
+#EOF
